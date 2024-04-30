@@ -1,5 +1,5 @@
-use alloc::string::String;
-use alloc::vec::Vec;
+#[cfg(not(feature = "std"))]
+use alloc::{string::String, vec::Vec};
 use core::ops::Range;
 
 use crate::field::extension::Extendable;
@@ -11,6 +11,7 @@ use crate::hash::hash_types::RichField;
 use crate::iop::ext_target::ExtensionTarget;
 use crate::iop::generator::WitnessGeneratorRef;
 use crate::plonk::circuit_builder::CircuitBuilder;
+use crate::plonk::circuit_data::CommonCircuitData;
 use crate::plonk::vars::{
     EvaluationTargets, EvaluationVars, EvaluationVarsBase, EvaluationVarsBaseBatch,
     EvaluationVarsBasePacked,
@@ -18,10 +19,11 @@ use crate::plonk::vars::{
 use crate::util::serialization::{Buffer, IoResult};
 
 /// A gate whose first four wires will be equal to a hash of public inputs.
+#[derive(Debug)]
 pub struct PublicInputGate;
 
 impl PublicInputGate {
-    pub fn wires_public_inputs_hash() -> Range<usize> {
+    pub(crate) const fn wires_public_inputs_hash() -> Range<usize> {
         0..4
     }
 }
@@ -31,11 +33,15 @@ impl<F: RichField + Extendable<D>, const D: usize> Gate<F, D> for PublicInputGat
         "PublicInputGate".into()
     }
 
-    fn serialize(&self, _dst: &mut Vec<u8>) -> IoResult<()> {
+    fn serialize(
+        &self,
+        _dst: &mut Vec<u8>,
+        _common_data: &CommonCircuitData<F, D>,
+    ) -> IoResult<()> {
         Ok(())
     }
 
-    fn deserialize(_src: &mut Buffer) -> IoResult<Self> {
+    fn deserialize(_src: &mut Buffer, _common_data: &CommonCircuitData<F, D>) -> IoResult<Self> {
         Ok(Self)
     }
 
@@ -72,7 +78,7 @@ impl<F: RichField + Extendable<D>, const D: usize> Gate<F, D> for PublicInputGat
             .collect()
     }
 
-    fn generators(&self, _row: usize, _local_constants: &[F]) -> Vec<WitnessGeneratorRef<F>> {
+    fn generators(&self, _row: usize, _local_constants: &[F]) -> Vec<WitnessGeneratorRef<F, D>> {
         Vec::new()
     }
 

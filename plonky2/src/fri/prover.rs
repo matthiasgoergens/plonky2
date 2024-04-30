@@ -1,3 +1,4 @@
+#[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
 
 use plonky2_maybe_rayon::*;
@@ -61,18 +62,22 @@ pub fn fri_proof<F: RichField + Extendable<D>, C: GenericConfig<D, F = F>, const
     }
 }
 
-type FriCommitedTrees<F, C, const D: usize> = (
+pub(crate) type FriCommitedTrees<F, C, const D: usize> = (
     Vec<MerkleTree<F, <C as GenericConfig<D>>::Hasher>>,
     PolynomialCoeffs<<F as Extendable<D>>::Extension>,
 );
 
-fn fri_committed_trees<F: RichField + Extendable<D>, C: GenericConfig<D, F = F>, const D: usize>(
+pub(crate) fn fri_committed_trees<
+    F: RichField + Extendable<D>,
+    C: GenericConfig<D, F = F>,
+    const D: usize,
+>(
     mut coeffs: PolynomialCoeffs<F::Extension>,
     mut values: PolynomialValues<F::Extension>,
     challenger: &mut Challenger<F, C::Hasher>,
     fri_params: &FriParams,
 ) -> FriCommitedTrees<F, C, D> {
-    let mut trees = Vec::new();
+    let mut trees = Vec::with_capacity(fri_params.reduction_arity_bits.len());
 
     let mut shift = F::MULTIPLICATIVE_GROUP_GENERATOR;
     for arity_bits in &fri_params.reduction_arity_bits {
@@ -112,7 +117,11 @@ fn fri_committed_trees<F: RichField + Extendable<D>, C: GenericConfig<D, F = F>,
 }
 
 /// Performs the proof-of-work (a.k.a. grinding) step of the FRI protocol. Returns the PoW witness.
-fn fri_proof_of_work<F: RichField + Extendable<D>, C: GenericConfig<D, F = F>, const D: usize>(
+pub(crate) fn fri_proof_of_work<
+    F: RichField + Extendable<D>,
+    C: GenericConfig<D, F = F>,
+    const D: usize,
+>(
     challenger: &mut Challenger<F, C::Hasher>,
     config: &FriConfig,
 ) -> F {
@@ -136,7 +145,7 @@ fn fri_proof_of_work<F: RichField + Extendable<D>, C: GenericConfig<D, F = F>, c
     // obtaining our duplex's post-state which contains the PoW response.
     let mut duplex_intermediate_state = challenger.sponge_state;
     let witness_input_pos = challenger.input_buffer.len();
-    duplex_intermediate_state.set_from_iter(challenger.input_buffer.clone().into_iter(), 0);
+    duplex_intermediate_state.set_from_iter(challenger.input_buffer.clone(), 0);
 
     let pow_witness = (0..=F::NEG_ONE.to_canonical_u64())
         .into_par_iter()

@@ -1,5 +1,3 @@
-#![allow(clippy::upper_case_acronyms)]
-
 use anyhow::Result;
 use plonky2::field::types::Field;
 use plonky2::iop::witness::{PartialWitness, WitnessWrite};
@@ -18,6 +16,8 @@ fn main() -> Result<()> {
 
     // The secret value.
     let value = builder.add_virtual_target();
+
+    // Registered as a public input (even though it's secret) so we can print out the value later.
     builder.register_public_input(value);
 
     let log_max = 6;

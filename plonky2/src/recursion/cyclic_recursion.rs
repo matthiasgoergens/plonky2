@@ -1,5 +1,8 @@
 #![allow(clippy::int_plus_one)] // Makes more sense for some inequalities below.
 
+#[cfg(not(feature = "std"))]
+use alloc::vec::Vec;
+
 use anyhow::{ensure, Result};
 
 use crate::field::extension::Extendable;
@@ -49,7 +52,7 @@ impl VerifierCircuitTarget {
     }
 
     pub fn from_bytes(bytes: Vec<u8>) -> IoResult<Self> {
-        let mut buffer = Buffer::new(bytes);
+        let mut buffer = Buffer::new(&bytes);
         let constants_sigmas_cap = buffer.read_target_merkle_cap()?;
         let circuit_digest = buffer.read_target_hash()?;
         Ok(Self {
@@ -196,6 +199,9 @@ where
 
 #[cfg(test)]
 mod tests {
+    #[cfg(not(feature = "std"))]
+    use alloc::vec;
+
     use anyhow::Result;
 
     use crate::field::extension::Extendable;

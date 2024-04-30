@@ -1,5 +1,9 @@
-use alloc::vec;
-use alloc::vec::Vec;
+#[cfg(not(feature = "std"))]
+use alloc::{
+    string::{String, ToString},
+    vec,
+    vec::Vec,
+};
 
 use crate::field::extension::Extendable;
 use crate::gates::base_sum::BaseSumGate;
@@ -8,7 +12,7 @@ use crate::iop::generator::{GeneratedValues, SimpleGenerator};
 use crate::iop::target::{BoolTarget, Target};
 use crate::iop::witness::{PartitionWitness, Witness, WitnessWrite};
 use crate::plonk::circuit_builder::CircuitBuilder;
-use crate::util::ceil_div_usize;
+use crate::plonk::circuit_data::CommonCircuitData;
 use crate::util::serialization::{Buffer, IoResult, Read, Write};
 
 impl<F: RichField + Extendable<D>, const D: usize> CircuitBuilder<F, D> {
@@ -21,7 +25,7 @@ impl<F: RichField + Extendable<D>, const D: usize> CircuitBuilder<F, D> {
             return Vec::new();
         }
         let gate_type = BaseSumGate::<2>::new_from_config::<F>(&self.config);
-        let k = ceil_div_usize(num_bits, gate_type.num_limbs);
+        let k = num_bits.div_ceil(gate_type.num_limbs);
         let gates = (0..k)
             .map(|_| self.add_gate(gate_type, vec![]))
             .collect::<Vec<_>>();
@@ -62,7 +66,7 @@ pub struct SplitGenerator {
     bits: Vec<Target>,
 }
 
-impl<F: RichField> SimpleGenerator<F> for SplitGenerator {
+impl<F: RichField + Extendable<D>, const D: usize> SimpleGenerator<F, D> for SplitGenerator {
     fn id(&self) -> String {
         "SplitGenerator".to_string()
     }
@@ -86,12 +90,12 @@ impl<F: RichField> SimpleGenerator<F> for SplitGenerator {
         );
     }
 
-    fn serialize(&self, dst: &mut Vec<u8>) -> IoResult<()> {
+    fn serialize(&self, dst: &mut Vec<u8>, _common_data: &CommonCircuitData<F, D>) -> IoResult<()> {
         dst.write_target(self.integer)?;
         dst.write_target_vec(&self.bits)
     }
 
-    fn deserialize(src: &mut Buffer) -> IoResult<Self> {
+    fn deserialize(src: &mut Buffer, _common_data: &CommonCircuitData<F, D>) -> IoResult<Self> {
         let integer = src.read_target()?;
         let bits = src.read_target_vec()?;
         Ok(Self { integer, bits })
@@ -105,7 +109,7 @@ pub struct WireSplitGenerator {
     num_limbs: usize,
 }
 
-impl<F: RichField> SimpleGenerator<F> for WireSplitGenerator {
+impl<F: RichField + Extendable<D>, const D: usize> SimpleGenerator<F, D> for WireSplitGenerator {
     fn id(&self) -> String {
         "WireSplitGenerator".to_string()
     }
@@ -141,13 +145,13 @@ impl<F: RichField> SimpleGenerator<F> for WireSplitGenerator {
         );
     }
 
-    fn serialize(&self, dst: &mut Vec<u8>) -> IoResult<()> {
+    fn serialize(&self, dst: &mut Vec<u8>, _common_data: &CommonCircuitData<F, D>) -> IoResult<()> {
         dst.write_target(self.integer)?;
         dst.write_usize_vec(&self.gates)?;
         dst.write_usize(self.num_limbs)
     }
 
-    fn deserialize(src: &mut Buffer) -> IoResult<Self> {
+    fn deserialize(src: &mut Buffer, _common_data: &CommonCircuitData<F, D>) -> IoResult<Self> {
         let integer = src.read_target()?;
         let gates = src.read_usize_vec()?;
         let num_limbs = src.read_usize()?;

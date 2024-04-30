@@ -1,5 +1,3 @@
-#![allow(clippy::upper_case_acronyms)]
-
 use core::marker::PhantomData;
 
 use anyhow::Result;
@@ -14,7 +12,7 @@ use plonky2::iop::generator::{
 use plonky2::iop::target::Target;
 use plonky2::iop::witness::{PartialWitness, PartitionWitness, Witness, WitnessWrite};
 use plonky2::plonk::circuit_builder::CircuitBuilder;
-use plonky2::plonk::circuit_data::{CircuitConfig, CircuitData};
+use plonky2::plonk::circuit_data::{CircuitConfig, CircuitData, CommonCircuitData};
 use plonky2::plonk::config::{AlgebraicHasher, GenericConfig, PoseidonGoldilocksConfig};
 use plonky2::recursion::dummy_circuit::DummyProofGenerator;
 use plonky2::util::serialization::{
@@ -32,7 +30,7 @@ struct SquareRootGenerator<F: RichField + Extendable<D>, const D: usize> {
     _phantom: PhantomData<F>,
 }
 
-impl<F: RichField + Extendable<D>, const D: usize> SimpleGenerator<F>
+impl<F: RichField + Extendable<D>, const D: usize> SimpleGenerator<F, D>
     for SquareRootGenerator<F, D>
 {
     fn id(&self) -> String {
@@ -52,12 +50,12 @@ impl<F: RichField + Extendable<D>, const D: usize> SimpleGenerator<F>
         out_buffer.set_target(self.x, x);
     }
 
-    fn serialize(&self, dst: &mut Vec<u8>) -> IoResult<()> {
+    fn serialize(&self, dst: &mut Vec<u8>, _common_data: &CommonCircuitData<F, D>) -> IoResult<()> {
         dst.write_target(self.x)?;
         dst.write_target(self.x_squared)
     }
 
-    fn deserialize(src: &mut Buffer) -> IoResult<Self> {
+    fn deserialize(src: &mut Buffer, _common_data: &CommonCircuitData<F, D>) -> IoResult<Self> {
         let x = src.read_target()?;
         let x_squared = src.read_target()?;
         Ok(Self {
@@ -68,6 +66,7 @@ impl<F: RichField + Extendable<D>, const D: usize> SimpleGenerator<F>
     }
 }
 
+#[derive(Default)]
 pub struct CustomGeneratorSerializer<C: GenericConfig<D>, const D: usize> {
     pub _phantom: PhantomData<C>,
 }
@@ -133,9 +132,7 @@ fn main() -> Result<()> {
     // Test serialization
     {
         let gate_serializer = DefaultGateSerializer;
-        let generator_serializer = CustomGeneratorSerializer {
-            _phantom: PhantomData::<C>,
-        };
+        let generator_serializer = CustomGeneratorSerializer::<C, D>::default();
 
         let data_bytes = data
             .to_bytes(&gate_serializer, &generator_serializer)

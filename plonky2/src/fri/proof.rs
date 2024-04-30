@@ -1,5 +1,5 @@
-use alloc::vec;
-use alloc::vec::Vec;
+#[cfg(not(feature = "std"))]
+use alloc::{vec, vec::Vec};
 
 use hashbrown::HashMap;
 use itertools::izip;
@@ -43,12 +43,23 @@ pub struct FriInitialTreeProof<F: RichField, H: Hasher<F>> {
 
 impl<F: RichField, H: Hasher<F>> FriInitialTreeProof<F, H> {
     pub(crate) fn unsalted_eval(&self, oracle_index: usize, poly_index: usize, salted: bool) -> F {
-        self.unsalted_evals(oracle_index, salted)[poly_index]
+        self.unsalted_evals(0, oracle_index, salted)[poly_index]
     }
 
-    fn unsalted_evals(&self, oracle_index: usize, salted: bool) -> &[F] {
+    // the Field Merkle Tree version
+    pub(crate) fn fmt_unsalted_eval(
+        &self,
+        start_index: usize,
+        oracle_index: usize,
+        poly_index: usize,
+        salted: bool,
+    ) -> F {
+        self.unsalted_evals(start_index, oracle_index, salted)[poly_index]
+    }
+
+    fn unsalted_evals(&self, start_index: usize, oracle_index: usize, salted: bool) -> &[F] {
         let evals = &self.evals_proofs[oracle_index].0;
-        &evals[..evals.len() - salt_size(salted)]
+        &evals[start_index..evals.len() - salt_size(salted)]
     }
 }
 
@@ -194,7 +205,7 @@ impl<F: RichField + Extendable<D>, H: Hasher<F>, const D: usize> FriProof<F, H, 
 
         let mut compressed_query_proofs = CompressedFriQueryRounds {
             indices: indices.to_vec(),
-            initial_trees_proofs: HashMap::new(),
+            initial_trees_proofs: HashMap::with_capacity(indices.len()),
             steps: vec![HashMap::new(); num_reductions],
         };
 
@@ -360,6 +371,7 @@ impl<F: RichField + Extendable<D>, H: Hasher<F>, const D: usize> CompressedFriPr
     }
 }
 
+#[derive(Debug)]
 pub struct FriChallenges<F: RichField + Extendable<D>, const D: usize> {
     // Scaling factor to combine polynomials.
     pub fri_alpha: F::Extension,
@@ -373,6 +385,7 @@ pub struct FriChallenges<F: RichField + Extendable<D>, const D: usize> {
     pub fri_query_indices: Vec<usize>,
 }
 
+#[derive(Debug)]
 pub struct FriChallengesTarget<const D: usize> {
     pub fri_alpha: ExtensionTarget<D>,
     pub fri_betas: Vec<ExtensionTarget<D>>,

@@ -1,4 +1,5 @@
 # Plonky2 & more
+[![Discord](https://img.shields.io/discord/743511677072572486?logo=discord)](https://discord.gg/QZKRUpqCJ6)
 
 This repository was originally for Plonky2, a SNARK implementation based on techniques from PLONK and FRI. It has since expanded to include tools such as Starky, a highly performant STARK implementation.
 
@@ -47,7 +48,7 @@ RUSTFLAGS=-Ctarget-cpu=native cargo run --release --example bench_recursion -- -
 
 ## Jemalloc
 
-Plonky2 prefers the [Jemalloc](http://jemalloc.net) memory allocator due to its superior performance. To use it, include `jemallocator = "0.5.0"` in`Cargo.toml`and add the following lines
+Plonky2 prefers the [Jemalloc](http://jemalloc.net) memory allocator due to its superior performance. To use it, include `jemallocator = "0.5.0"` in your `Cargo.toml` and add the following lines
 to your `main.rs`:
 
 ```rust
@@ -59,10 +60,18 @@ static GLOBAL: Jemalloc = Jemalloc;
 
 Jemalloc is known to cause crashes when a binary compiled for x86 is run on an Apple silicon-based Mac under [Rosetta 2](https://support.apple.com/en-us/HT211861). If you are experiencing crashes on your Apple silicon Mac, run `rustc --print target-libdir`. The output should contain `aarch64-apple-darwin`. If the output contains `x86_64-apple-darwin`, then you are running the Rust toolchain for x86; we recommend switching to the native ARM version.
 
+## Contributing guidelines
+
+See [CONTRIBUTING.md](./CONTRIBUTING.md).
 
 ## Licenses
 
-As this is a monorepo, see the individual crates within for license information.
+All crates of this monorepo are licensed under either of
+
+* Apache License, Version 2.0, ([LICENSE-APACHE](LICENSE-APACHE) or http://www.apache.org/licenses/LICENSE-2.0)
+* MIT license ([LICENSE-MIT](LICENSE-MIT) or http://opensource.org/licenses/MIT)
+
+at your option.
 
 
 ## Security
@@ -76,8 +85,14 @@ Plonky2's default hash function is Poseidon, configured with 8 full rounds, 22 p
 
 ## Links
 
-- [System Zero](https://github.com/mir-protocol/system-zero), a zkVM built on top of Starky (no longer maintained)
-- [Waksman](https://github.com/mir-protocol/plonky2-waksman), Plonky2 gadgets for permutation checking using Waksman networks (no longer maintained)
-- [Insertion](https://github.com/mir-protocol/plonky2-insertion), Plonky2 gadgets for insertion into a list (no longer maintained)
-- [u32](https://github.com/mir-protocol/plonky2-u32), Plonky2 gadgets for u32 arithmetic (no longer actively maintained)
-- [ECDSA](https://github.com/mir-protocol/plonky2-ecdsa), Plonky2 gadgets for the ECDSA algorithm (no longer actively maintained)
+#### Actively maintained
+
+- [Polygon Zero's zkEVM](https://github.com/0xPolygonZero/zk_evm), an efficient Type 1 zkEVM built on top of Starky and plonky2
+
+#### No longer maintained
+
+- [System Zero](https://github.com/0xPolygonZero/system-zero), a zkVM built on top of Starky
+- [Waksman](https://github.com/0xPolygonZero/plonky2-waksman), Plonky2 gadgets for permutation checking using Waksman networks
+- [Insertion](https://github.com/0xPolygonZero/plonky2-insertion), Plonky2 gadgets for insertion into a list
+- [u32](https://github.com/0xPolygonZero/plonky2-u32), Plonky2 gadgets for u32 arithmetic
+- [ECDSA](https://github.com/0xPolygonZero/plonky2-ecdsa), Plonky2 gadgets for the ECDSA algorithm

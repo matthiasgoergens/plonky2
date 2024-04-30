@@ -1,5 +1,9 @@
-use alloc::vec;
-use alloc::vec::Vec;
+#[cfg(not(feature = "std"))]
+use alloc::{
+    string::{String, ToString},
+    vec,
+    vec::Vec,
+};
 use core::borrow::Borrow;
 
 use crate::field::extension::Extendable;
@@ -7,10 +11,11 @@ use crate::field::types::Field64;
 use crate::gates::arithmetic_base::ArithmeticGate;
 use crate::gates::exponentiation::ExponentiationGate;
 use crate::hash::hash_types::RichField;
-use crate::iop::generator::{GeneratedValues, SimpleGenerator};
+use crate::iop::generator::{GeneratedValues, NonzeroTestGenerator, SimpleGenerator};
 use crate::iop::target::{BoolTarget, Target};
 use crate::iop::witness::{PartitionWitness, Witness, WitnessWrite};
 use crate::plonk::circuit_builder::CircuitBuilder;
+use crate::plonk::circuit_data::CommonCircuitData;
 use crate::util::serialization::{Buffer, IoResult, Read, Write};
 
 impl<F: RichField + Extendable<D>, const D: usize> CircuitBuilder<F, D> {
@@ -189,7 +194,7 @@ impl<F: RichField + Extendable<D>, const D: usize> CircuitBuilder<F, D> {
         self.arithmetic(F::ONE, F::ONE, x, one, y)
     }
 
-    /// Add `n` `Target`s.
+    /// Adds `n` `Target`s.
     pub fn add_many<T>(&mut self, terms: impl IntoIterator<Item = T>) -> Target
     where
         T: Borrow<Target>,
@@ -222,7 +227,7 @@ impl<F: RichField + Extendable<D>, const D: usize> CircuitBuilder<F, D> {
             .fold(self.one(), |acc, t| self.mul(acc, *t.borrow()))
     }
 
-    /// Exponentiate `base` to the power of `2^power_log`.
+    /// Exponentiates `base` to the power of `2^power_log`.
     pub fn exp_power_of_2(&mut self, base: Target, power_log: usize) -> Target {
         if power_log > self.num_base_arithmetic_ops_per_gate() {
             // Cheaper to just use `ExponentiateGate`.
@@ -237,7 +242,7 @@ impl<F: RichField + Extendable<D>, const D: usize> CircuitBuilder<F, D> {
     }
 
     // TODO: Test
-    /// Exponentiate `base` to the power of `exponent`, given by its little-endian bits.
+    /// Exponentiates `base` to the power of `exponent`, given by its little-endian bits.
     pub fn exp_from_bits(
         &mut self,
         base: Target,
@@ -262,7 +267,7 @@ impl<F: RichField + Extendable<D>, const D: usize> CircuitBuilder<F, D> {
     }
 
     // TODO: Test
-    /// Exponentiate `base` to the power of `exponent`, where `exponent < 2^num_bits`.
+    /// Exponentiates `base` to the power of `exponent`, where `exponent < 2^num_bits`.
     pub fn exp(&mut self, base: Target, exponent: Target, num_bits: usize) -> Target {
         let exponent_bits = self.split_le(exponent, num_bits);
 
@@ -301,7 +306,7 @@ impl<F: RichField + Extendable<D>, const D: usize> CircuitBuilder<F, D> {
         product
     }
 
-    /// Exponentiate `base` to the power of a known `exponent`.
+    /// Exponentiates `base` to the power of a known `exponent`.
     // TODO: Test
     pub fn exp_u64(&mut self, base: Target, mut exponent: u64) -> Target {
         let mut exp_bits = Vec::new();
@@ -328,28 +333,32 @@ impl<F: RichField + Extendable<D>, const D: usize> CircuitBuilder<F, D> {
         self.inverse_extension(x_ext).0[0]
     }
 
+    /// Computes the logical NOT of the provided [`BoolTarget`].
     pub fn not(&mut self, b: BoolTarget) -> BoolTarget {
         let one = self.one();
         let res = self.sub(one, b.target);
         BoolTarget::new_unsafe(res)
     }
 
+    /// Computes the logical AND of the provided [`BoolTarget`]s.
     pub fn and(&mut self, b1: BoolTarget, b2: BoolTarget) -> BoolTarget {
         BoolTarget::new_unsafe(self.mul(b1.target, b2.target))
     }
 
-    /// computes the arithmetic extension of logical "or": `b1 + b2 - b1 * b2`
+    /// Computes the logical OR through the arithmetic expression: `b1 + b2 - b1 * b2`.
     pub fn or(&mut self, b1: BoolTarget, b2: BoolTarget) -> BoolTarget {
         let res_minus_b2 = self.arithmetic(-F::ONE, F::ONE, b1.target, b2.target, b1.target);
         BoolTarget::new_unsafe(self.add(res_minus_b2, b2.target))
     }
 
+    /// Outputs `x` if `b` is true, and else `y`, through the formula: `b*x + (1-b)*y`.
     pub fn _if(&mut self, b: BoolTarget, x: Target, y: Target) -> Target {
         let not_b = self.not(b);
         let maybe_x = self.mul(b.target, x);
         self.mul_add(not_b.target, y, maybe_x)
     }
 
+    /// Checks whether `x` and `y` are equal and outputs the boolean result.
     pub fn is_equal(&mut self, x: Target, y: Target) -> BoolTarget {
         let zero = self.zero();
 
@@ -369,6 +378,27 @@ impl<F: RichField + Extendable<D>, const D: usize> CircuitBuilder<F, D> {
 
         equal
     }
+
+    pub fn is_nonzero(&mut self, x: Target) -> BoolTarget {
+        let zero = self.zero();
+        let one = self.one();
+        let inv = self.add_virtual_target();
+        self.add_simple_generator(NonzeroTestGenerator { to_test: x, inv });
+
+        // if x is zero, result should be `0`, otherwise result should be `1`
+        let result = self.mul(x, inv);
+
+        // Enforce the result through arithmetic
+        let tmp = self.sub(result, one); // (x * inv - 1)
+        let tmp = self.mul(tmp, x); // (x * inv - 1) * x
+
+        // If everything has been done correctly, `(x * inv - 1) * x` will always equal 0
+        // this is because either `x * inv` equals `1`, making `(x * inv - 1)` equal `0`
+        // or `x` equals `0`
+        self.connect(tmp, zero);
+
+        BoolTarget::new_unsafe(result)
+    }
 }
 
 #[derive(Debug, Default)]
@@ -379,7 +409,7 @@ pub struct EqualityGenerator {
     inv: Target,
 }
 
-impl<F: RichField> SimpleGenerator<F> for EqualityGenerator {
+impl<F: RichField + Extendable<D>, const D: usize> SimpleGenerator<F, D> for EqualityGenerator {
     fn id(&self) -> String {
         "EqualityGenerator".to_string()
     }
@@ -398,14 +428,14 @@ impl<F: RichField> SimpleGenerator<F> for EqualityGenerator {
         out_buffer.set_target(self.inv, inv);
     }
 
-    fn serialize(&self, dst: &mut Vec<u8>) -> IoResult<()> {
+    fn serialize(&self, dst: &mut Vec<u8>, _common_data: &CommonCircuitData<F, D>) -> IoResult<()> {
         dst.write_target(self.x)?;
         dst.write_target(self.y)?;
         dst.write_target_bool(self.equal)?;
         dst.write_target(self.inv)
     }
 
-    fn deserialize(src: &mut Buffer) -> IoResult<Self> {
+    fn deserialize(src: &mut Buffer, _common_data: &CommonCircuitData<F, D>) -> IoResult<Self> {
         let x = src.read_target()?;
         let y = src.read_target()?;
         let equal = src.read_target_bool()?;
@@ -415,11 +445,61 @@ impl<F: RichField> SimpleGenerator<F> for EqualityGenerator {
 }
 
 /// Represents a base arithmetic operation in the circuit. Used to memoize results.
-#[derive(Copy, Clone, Eq, PartialEq, Hash)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
 pub(crate) struct BaseArithmeticOperation<F: Field64> {
     const_0: F,
     const_1: F,
     multiplicand_0: Target,
     multiplicand_1: Target,
     addend: Target,
+}
+
+#[cfg(test)]
+mod tests {
+    use anyhow::Result;
+
+    use crate::field::types::Field;
+    use crate::iop::witness::{PartialWitness, WitnessWrite};
+    use crate::plonk::circuit_builder::CircuitBuilder;
+    use crate::plonk::circuit_data::CircuitConfig;
+    use crate::plonk::config::{GenericConfig, PoseidonGoldilocksConfig};
+    use crate::plonk::verifier::verify;
+
+    fn nonzero_rand<F: Field>() -> F {
+        loop {
+            let f = F::rand();
+            if f.is_nonzero() {
+                return f;
+            }
+        }
+    }
+
+    #[test]
+    fn test_is_nonzero() -> Result<()> {
+        const D: usize = 2;
+        type C = PoseidonGoldilocksConfig;
+        type F = <C as GenericConfig<D>>::F;
+
+        let config = CircuitConfig::standard_recursion_config();
+
+        let mut pw = PartialWitness::<F>::new();
+        let mut builder = CircuitBuilder::<F, D>::new(config);
+
+        let vs = [F::ZERO, nonzero_rand()];
+        let ts = builder.add_virtual_target_arr::<2>();
+        pw.set_target_arr(&ts, &vs);
+
+        let _false = builder._false();
+        let _true = builder._true();
+        let nz0 = builder.is_nonzero(ts[0]);
+        let nz1 = builder.is_nonzero(ts[1]);
+
+        builder.connect(nz0.target, _false.target);
+        builder.connect(nz1.target, _true.target);
+
+        let data = builder.build::<C>();
+        let proof = data.prove(pw)?;
+
+        verify(proof, &data.verifier_only, &data.common)
+    }
 }

@@ -1,3 +1,4 @@
+#[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
 
 use itertools::Itertools;
@@ -74,7 +75,7 @@ impl<F: RichField + Extendable<D>, const D: usize> CircuitBuilder<F, D> {
     }
 
     /// Computes `if b { proof_with_pis0 } else { proof_with_pis1 }`.
-    fn select_proof_with_pis(
+    pub fn select_proof_with_pis(
         &mut self,
         b: BoolTarget,
         proof_with_pis0: &ProofWithPublicInputsTarget<D>,
@@ -191,6 +192,8 @@ impl<F: RichField + Extendable<D>, const D: usize> CircuitBuilder<F, D> {
             wires: self.select_vec_ext(b, &os0.wires, &os1.wires),
             plonk_zs: self.select_vec_ext(b, &os0.plonk_zs, &os1.plonk_zs),
             plonk_zs_next: self.select_vec_ext(b, &os0.plonk_zs_next, &os1.plonk_zs_next),
+            lookup_zs: self.select_vec_ext(b, &os0.lookup_zs, &os1.lookup_zs),
+            next_lookup_zs: self.select_vec_ext(b, &os0.next_lookup_zs, &os1.next_lookup_zs),
             partial_products: self.select_vec_ext(b, &os0.partial_products, &os1.partial_products),
             quotient_polys: self.select_vec_ext(b, &os0.quotient_polys, &os1.quotient_polys),
         }
@@ -334,6 +337,9 @@ impl<F: RichField + Extendable<D>, const D: usize> CircuitBuilder<F, D> {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(not(feature = "std"))]
+    use alloc::vec;
+
     use anyhow::Result;
     use hashbrown::HashMap;
 
@@ -342,7 +348,7 @@ mod tests {
     use crate::gates::noop::NoopGate;
     use crate::iop::witness::{PartialWitness, WitnessWrite};
     use crate::plonk::circuit_data::CircuitConfig;
-    use crate::plonk::config::{GenericConfig, PoseidonGoldilocksConfig};
+    use crate::plonk::config::PoseidonGoldilocksConfig;
     use crate::recursion::dummy_circuit::{dummy_circuit, dummy_proof};
 
     #[test]

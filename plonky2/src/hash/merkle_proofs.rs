@@ -1,5 +1,5 @@
-use alloc::vec;
-use alloc::vec::Vec;
+#[cfg(not(feature = "std"))]
+use alloc::{vec, vec::Vec};
 
 use anyhow::{ensure, Result};
 use itertools::Itertools;
@@ -12,7 +12,7 @@ use crate::hash::merkle_tree::MerkleCap;
 use crate::iop::target::{BoolTarget, Target};
 use crate::plonk::circuit_builder::CircuitBuilder;
 use crate::plonk::circuit_data::VerifierCircuitTarget;
-use crate::plonk::config::{AlgebraicHasher, Hasher};
+use crate::plonk::config::{AlgebraicHasher, GenericHashOut, Hasher};
 
 #[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq)]
 #[serde(bound = "")]
@@ -76,6 +76,44 @@ pub fn verify_merkle_proof_to_cap<F: RichField, H: Hasher<F>>(
     Ok(())
 }
 
+/// Verifies that the given leaf data is present at the given index in the Field Merkle tree with the
+/// given cap.
+pub fn verify_field_merkle_proof_to_cap<F: RichField, H: Hasher<F>>(
+    leaf_data: &[Vec<F>],
+    leaf_heights: &[usize],
+    mut leaf_index: usize,
+    merkle_cap: &MerkleCap<F, H>,
+    proof: &MerkleProof<F, H>,
+) -> Result<()> {
+    assert_eq!(leaf_data.len(), leaf_heights.len());
+    let mut current_digest = H::hash_or_noop(&leaf_data[0]);
+    let mut current_height = leaf_heights[0];
+    let mut leaf_data_index = 1;
+    for &sibling_digest in proof.siblings.iter() {
+        if leaf_data_index < leaf_heights.len() && current_height == leaf_heights[leaf_data_index] {
+            let mut new_leaves = current_digest.to_vec();
+            new_leaves.extend_from_slice(&leaf_data[leaf_data_index]);
+            current_digest = H::hash_or_noop(&new_leaves);
+            leaf_data_index += 1;
+        }
+
+        let bit = leaf_index & 1;
+        leaf_index >>= 1;
+        current_digest = if bit == 1 {
+            H::two_to_one(sibling_digest, current_digest)
+        } else {
+            H::two_to_one(current_digest, sibling_digest)
+        };
+        current_height -= 1;
+    }
+    ensure!(
+        current_digest == merkle_cap.0[leaf_index],
+        "Invalid Merkle proof."
+    );
+
+    Ok(())
+}
+
 impl<F: RichField + Extendable<D>, const D: usize> CircuitBuilder<F, D> {
     /// Verifies that the given leaf data is present at the given index in the Merkle tree with the
     /// given root. The index is given by its little-endian bits.
@@ -132,7 +170,7 @@ impl<F: RichField + Extendable<D>, const D: usize> CircuitBuilder<F, D> {
             perm_inputs.set_from_slice(&state.elements, 0);
             perm_inputs.set_from_slice(&sibling.elements, NUM_HASH_OUT_ELTS);
             // Ensure the rest of the state, if any, is zero:
-            perm_inputs.set_from_iter(std::iter::repeat(zero), 2 * NUM_HASH_OUT_ELTS);
+            perm_inputs.set_from_iter(core::iter::repeat(zero), 2 * NUM_HASH_OUT_ELTS);
             let perm_outs = self.permute_swapped::<H>(perm_inputs, bit);
             let hash_outs = perm_outs.squeeze()[0..NUM_HASH_OUT_ELTS]
                 .try_into()
@@ -171,7 +209,6 @@ impl<F: RichField + Extendable<D>, const D: usize> CircuitBuilder<F, D> {
 
 #[cfg(test)]
 mod tests {
-    use anyhow::Result;
     use rand::rngs::OsRng;
     use rand::Rng;
 
@@ -179,7 +216,6 @@ mod tests {
     use crate::field::types::Field;
     use crate::hash::merkle_tree::MerkleTree;
     use crate::iop::witness::{PartialWitness, WitnessWrite};
-    use crate::plonk::circuit_builder::CircuitBuilder;
     use crate::plonk::circuit_data::CircuitConfig;
     use crate::plonk::config::{GenericConfig, PoseidonGoldilocksConfig};
     use crate::plonk::verifier::verify;

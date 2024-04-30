@@ -1,6 +1,10 @@
-use alloc::string::String;
-use alloc::vec::Vec;
-use alloc::{format, vec};
+#[cfg(not(feature = "std"))]
+use alloc::{
+    format,
+    string::{String, ToString},
+    vec,
+    vec::Vec,
+};
 use core::marker::PhantomData;
 
 use itertools::Itertools;
@@ -18,7 +22,7 @@ use crate::iop::target::Target;
 use crate::iop::wire::Wire;
 use crate::iop::witness::{PartitionWitness, Witness, WitnessWrite};
 use crate::plonk::circuit_builder::CircuitBuilder;
-use crate::plonk::circuit_data::CircuitConfig;
+use crate::plonk::circuit_data::{CircuitConfig, CommonCircuitData};
 use crate::plonk::vars::{
     EvaluationTargets, EvaluationVars, EvaluationVarsBase, EvaluationVarsBaseBatch,
     EvaluationVarsBasePacked,
@@ -41,7 +45,7 @@ pub struct RandomAccessGate<F: RichField + Extendable<D>, const D: usize> {
 }
 
 impl<F: RichField + Extendable<D>, const D: usize> RandomAccessGate<F, D> {
-    fn new(num_copies: usize, bits: usize, num_extra_constants: usize) -> Self {
+    const fn new(num_copies: usize, bits: usize, num_extra_constants: usize) -> Self {
         Self {
             bits,
             num_copies,
@@ -71,46 +75,46 @@ impl<F: RichField + Extendable<D>, const D: usize> RandomAccessGate<F, D> {
     }
 
     /// Length of the list being accessed.
-    fn vec_size(&self) -> usize {
+    const fn vec_size(&self) -> usize {
         1 << self.bits
     }
 
     /// For each copy, a wire containing the claimed index of the element.
-    pub fn wire_access_index(&self, copy: usize) -> usize {
+    pub(crate) const fn wire_access_index(&self, copy: usize) -> usize {
         debug_assert!(copy < self.num_copies);
         (2 + self.vec_size()) * copy
     }
 
     /// For each copy, a wire containing the element claimed to be at the index.
-    pub fn wire_claimed_element(&self, copy: usize) -> usize {
+    pub(crate) const fn wire_claimed_element(&self, copy: usize) -> usize {
         debug_assert!(copy < self.num_copies);
         (2 + self.vec_size()) * copy + 1
     }
 
     /// For each copy, wires containing the entire list.
-    pub fn wire_list_item(&self, i: usize, copy: usize) -> usize {
+    pub(crate) const fn wire_list_item(&self, i: usize, copy: usize) -> usize {
         debug_assert!(i < self.vec_size());
         debug_assert!(copy < self.num_copies);
         (2 + self.vec_size()) * copy + 2 + i
     }
 
-    fn start_extra_constants(&self) -> usize {
+    const fn start_extra_constants(&self) -> usize {
         (2 + self.vec_size()) * self.num_copies
     }
 
-    fn wire_extra_constant(&self, i: usize) -> usize {
+    const fn wire_extra_constant(&self, i: usize) -> usize {
         debug_assert!(i < self.num_extra_constants);
         self.start_extra_constants() + i
     }
 
     /// All above wires are routed.
-    pub fn num_routed_wires(&self) -> usize {
+    pub const fn num_routed_wires(&self) -> usize {
         self.start_extra_constants() + self.num_extra_constants
     }
 
     /// An intermediate wire where the prover gives the (purported) binary decomposition of the
     /// index.
-    pub fn wire_bit(&self, i: usize, copy: usize) -> usize {
+    pub(crate) const fn wire_bit(&self, i: usize, copy: usize) -> usize {
         debug_assert!(i < self.bits);
         debug_assert!(copy < self.num_copies);
         self.num_routed_wires() + copy * self.bits + i
@@ -122,14 +126,14 @@ impl<F: RichField + Extendable<D>, const D: usize> Gate<F, D> for RandomAccessGa
         format!("{self:?}<D={D}>")
     }
 
-    fn serialize(&self, dst: &mut Vec<u8>) -> IoResult<()> {
+    fn serialize(&self, dst: &mut Vec<u8>, _common_data: &CommonCircuitData<F, D>) -> IoResult<()> {
         dst.write_usize(self.bits)?;
         dst.write_usize(self.num_copies)?;
         dst.write_usize(self.num_extra_constants)?;
         Ok(())
     }
 
-    fn deserialize(src: &mut Buffer) -> IoResult<Self> {
+    fn deserialize(src: &mut Buffer, _common_data: &CommonCircuitData<F, D>) -> IoResult<Self> {
         let bits = src.read_usize()?;
         let num_copies = src.read_usize()?;
         let num_extra_constants = src.read_usize()?;
@@ -252,7 +256,7 @@ impl<F: RichField + Extendable<D>, const D: usize> Gate<F, D> for RandomAccessGa
         constraints
     }
 
-    fn generators(&self, row: usize, _local_constants: &[F]) -> Vec<WitnessGeneratorRef<F>> {
+    fn generators(&self, row: usize, _local_constants: &[F]) -> Vec<WitnessGeneratorRef<F, D>> {
         (0..self.num_copies)
             .map(|copy| {
                 WitnessGeneratorRef::new(
@@ -345,7 +349,7 @@ pub struct RandomAccessGenerator<F: RichField + Extendable<D>, const D: usize> {
     copy: usize,
 }
 
-impl<F: RichField + Extendable<D>, const D: usize> SimpleGenerator<F>
+impl<F: RichField + Extendable<D>, const D: usize> SimpleGenerator<F, D>
     for RandomAccessGenerator<F, D>
 {
     fn id(&self) -> String {
@@ -394,16 +398,16 @@ impl<F: RichField + Extendable<D>, const D: usize> SimpleGenerator<F>
         }
     }
 
-    fn serialize(&self, dst: &mut Vec<u8>) -> IoResult<()> {
+    fn serialize(&self, dst: &mut Vec<u8>, _common_data: &CommonCircuitData<F, D>) -> IoResult<()> {
         dst.write_usize(self.row)?;
         dst.write_usize(self.copy)?;
-        self.gate.serialize(dst)
+        self.gate.serialize(dst, _common_data)
     }
 
-    fn deserialize(src: &mut Buffer) -> IoResult<Self> {
+    fn deserialize(src: &mut Buffer, _common_data: &CommonCircuitData<F, D>) -> IoResult<Self> {
         let row = src.read_usize()?;
         let copy = src.read_usize()?;
-        let gate = RandomAccessGate::<F, D>::deserialize(src)?;
+        let gate = RandomAccessGate::<F, D>::deserialize(src, _common_data)?;
         Ok(Self { row, gate, copy })
     }
 }

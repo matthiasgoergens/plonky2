@@ -1,6 +1,10 @@
-use alloc::string::String;
-use alloc::vec::Vec;
-use alloc::{format, vec};
+#[cfg(not(feature = "std"))]
+use alloc::{
+    format,
+    string::{String, ToString},
+    vec,
+    vec::Vec,
+};
 use core::marker::PhantomData;
 
 use crate::field::extension::Extendable;
@@ -17,6 +21,7 @@ use crate::iop::target::Target;
 use crate::iop::wire::Wire;
 use crate::iop::witness::{PartitionWitness, Witness, WitnessWrite};
 use crate::plonk::circuit_builder::CircuitBuilder;
+use crate::plonk::circuit_data::CommonCircuitData;
 use crate::plonk::vars::{EvaluationTargets, EvaluationVars, EvaluationVarsBase};
 use crate::util::serialization::{Buffer, IoResult, Read, Write};
 
@@ -29,28 +34,28 @@ use crate::util::serialization::{Buffer, IoResult, Read, Write};
 pub struct PoseidonGate<F: RichField + Extendable<D>, const D: usize>(PhantomData<F>);
 
 impl<F: RichField + Extendable<D>, const D: usize> PoseidonGate<F, D> {
-    pub fn new() -> Self {
+    pub const fn new() -> Self {
         Self(PhantomData)
     }
 
     /// The wire index for the `i`th input to the permutation.
-    pub fn wire_input(i: usize) -> usize {
+    pub(crate) const fn wire_input(i: usize) -> usize {
         i
     }
 
     /// The wire index for the `i`th output to the permutation.
-    pub fn wire_output(i: usize) -> usize {
+    pub(crate) const fn wire_output(i: usize) -> usize {
         SPONGE_WIDTH + i
     }
 
     /// If this is set to 1, the first four inputs will be swapped with the next four inputs. This
     /// is useful for ordering hashes in Merkle proofs. Otherwise, this should be set to 0.
-    pub const WIRE_SWAP: usize = 2 * SPONGE_WIDTH;
+    pub(crate) const WIRE_SWAP: usize = 2 * SPONGE_WIDTH;
 
     const START_DELTA: usize = 2 * SPONGE_WIDTH + 1;
 
     /// A wire which stores `swap * (input[i + 4] - input[i])`; used to compute the swapped inputs.
-    fn wire_delta(i: usize) -> usize {
+    const fn wire_delta(i: usize) -> usize {
         assert!(i < 4);
         Self::START_DELTA + i
     }
@@ -59,7 +64,7 @@ impl<F: RichField + Extendable<D>, const D: usize> PoseidonGate<F, D> {
 
     /// A wire which stores the input of the `i`-th S-box of the `round`-th round of the first set
     /// of full rounds.
-    fn wire_full_sbox_0(round: usize, i: usize) -> usize {
+    const fn wire_full_sbox_0(round: usize, i: usize) -> usize {
         debug_assert!(
             round != 0,
             "First round S-box inputs are not stored as wires"
@@ -73,7 +78,7 @@ impl<F: RichField + Extendable<D>, const D: usize> PoseidonGate<F, D> {
         Self::START_FULL_0 + SPONGE_WIDTH * (poseidon::HALF_N_FULL_ROUNDS - 1);
 
     /// A wire which stores the input of the S-box of the `round`-th round of the partial rounds.
-    fn wire_partial_sbox(round: usize) -> usize {
+    const fn wire_partial_sbox(round: usize) -> usize {
         debug_assert!(round < poseidon::N_PARTIAL_ROUNDS);
         Self::START_PARTIAL + round
     }
@@ -82,14 +87,14 @@ impl<F: RichField + Extendable<D>, const D: usize> PoseidonGate<F, D> {
 
     /// A wire which stores the input of the `i`-th S-box of the `round`-th round of the second set
     /// of full rounds.
-    fn wire_full_sbox_1(round: usize, i: usize) -> usize {
+    const fn wire_full_sbox_1(round: usize, i: usize) -> usize {
         debug_assert!(round < poseidon::HALF_N_FULL_ROUNDS);
         debug_assert!(i < SPONGE_WIDTH);
         Self::START_FULL_1 + SPONGE_WIDTH * round + i
     }
 
     /// End of wire indices, exclusive.
-    fn end() -> usize {
+    const fn end() -> usize {
         Self::START_FULL_1 + SPONGE_WIDTH * poseidon::HALF_N_FULL_ROUNDS
     }
 }
@@ -99,11 +104,15 @@ impl<F: RichField + Extendable<D>, const D: usize> Gate<F, D> for PoseidonGate<F
         format!("{self:?}<WIDTH={SPONGE_WIDTH}>")
     }
 
-    fn serialize(&self, _dst: &mut Vec<u8>) -> IoResult<()> {
+    fn serialize(
+        &self,
+        _dst: &mut Vec<u8>,
+        _common_data: &CommonCircuitData<F, D>,
+    ) -> IoResult<()> {
         Ok(())
     }
 
-    fn deserialize(_src: &mut Buffer) -> IoResult<Self> {
+    fn deserialize(_src: &mut Buffer, _common_data: &CommonCircuitData<F, D>) -> IoResult<Self> {
         Ok(PoseidonGate::new())
     }
 
@@ -380,7 +389,7 @@ impl<F: RichField + Extendable<D>, const D: usize> Gate<F, D> for PoseidonGate<F
         constraints
     }
 
-    fn generators(&self, row: usize, _local_constants: &[F]) -> Vec<WitnessGeneratorRef<F>> {
+    fn generators(&self, row: usize, _local_constants: &[F]) -> Vec<WitnessGeneratorRef<F, D>> {
         let gen = PoseidonGenerator::<F, D> {
             row,
             _phantom: PhantomData,
@@ -415,7 +424,7 @@ pub struct PoseidonGenerator<F: RichField + Extendable<D> + Poseidon, const D: u
     _phantom: PhantomData<F>,
 }
 
-impl<F: RichField + Extendable<D> + Poseidon, const D: usize> SimpleGenerator<F>
+impl<F: RichField + Extendable<D> + Poseidon, const D: usize> SimpleGenerator<F, D>
     for PoseidonGenerator<F, D>
 {
     fn id(&self) -> String {
@@ -512,11 +521,11 @@ impl<F: RichField + Extendable<D> + Poseidon, const D: usize> SimpleGenerator<F>
         }
     }
 
-    fn serialize(&self, dst: &mut Vec<u8>) -> IoResult<()> {
+    fn serialize(&self, dst: &mut Vec<u8>, _common_data: &CommonCircuitData<F, D>) -> IoResult<()> {
         dst.write_usize(self.row)
     }
 
-    fn deserialize(src: &mut Buffer) -> IoResult<Self> {
+    fn deserialize(src: &mut Buffer, _common_data: &CommonCircuitData<F, D>) -> IoResult<Self> {
         let row = src.read_usize()?;
         Ok(Self {
             row,
@@ -528,16 +537,12 @@ impl<F: RichField + Extendable<D> + Poseidon, const D: usize> SimpleGenerator<F>
 #[cfg(test)]
 mod tests {
     use anyhow::Result;
+    use plonky2_field::goldilocks_field::GoldilocksField;
 
-    use crate::field::goldilocks_field::GoldilocksField;
-    use crate::field::types::Field;
+    use super::*;
     use crate::gates::gate_testing::{test_eval_fns, test_low_degree};
-    use crate::gates::poseidon::PoseidonGate;
-    use crate::hash::poseidon::{Poseidon, SPONGE_WIDTH};
     use crate::iop::generator::generate_partial_witness;
-    use crate::iop::wire::Wire;
-    use crate::iop::witness::{PartialWitness, Witness, WitnessWrite};
-    use crate::plonk::circuit_builder::CircuitBuilder;
+    use crate::iop::witness::PartialWitness;
     use crate::plonk::circuit_data::CircuitConfig;
     use crate::plonk::config::{GenericConfig, PoseidonGoldilocksConfig};
 
@@ -628,5 +633,49 @@ mod tests {
         type F = <C as GenericConfig<D>>::F;
         let gate = PoseidonGate::<F, 2>::new();
         test_eval_fns::<F, C, _, D>(gate)
+    }
+    #[test]
+    fn test_proof() {
+        use plonky2_field::types::Sample;
+
+        use crate::gates::gate::Gate;
+        use crate::hash::hash_types::HashOut;
+        use crate::plonk::vars::{EvaluationTargets, EvaluationVars};
+        const D: usize = 2;
+        type C = PoseidonGoldilocksConfig;
+        type F = <C as GenericConfig<D>>::F;
+        let gate = PoseidonGate::<F, 2>::new();
+        let wires = <<PoseidonGoldilocksConfig as GenericConfig<D>>::F as plonky2_field::extension::Extendable<D>>::Extension::rand_vec(gate.num_wires());
+        let constants = <<PoseidonGoldilocksConfig as GenericConfig<D>>::F as plonky2_field::extension::Extendable<D>>::Extension::rand_vec(gate.num_constants());
+        let public_inputs_hash = HashOut::rand();
+
+        let config = CircuitConfig::standard_recursion_config();
+        let mut pw = PartialWitness::new();
+        let mut builder = CircuitBuilder::<F, D>::new(config);
+
+        let wires_t = builder.add_virtual_extension_targets(wires.len());
+        let constants_t = builder.add_virtual_extension_targets(constants.len());
+        pw.set_extension_targets(&wires_t, &wires);
+        pw.set_extension_targets(&constants_t, &constants);
+        let public_inputs_hash_t = builder.add_virtual_hash();
+        pw.set_hash_target(public_inputs_hash_t, public_inputs_hash);
+
+        let vars = EvaluationVars {
+            local_constants: &constants,
+            local_wires: &wires,
+            public_inputs_hash: &public_inputs_hash,
+        };
+        let evals = gate.eval_unfiltered(vars);
+
+        let vars_t = EvaluationTargets {
+            local_constants: &constants_t,
+            local_wires: &wires_t,
+            public_inputs_hash: &public_inputs_hash_t,
+        };
+        let evals_t = gate.eval_unfiltered_circuit(&mut builder, vars_t);
+        pw.set_extension_targets(&evals_t, &evals);
+        let data = builder.build::<C>();
+        let proof = data.prove(pw);
+        assert!(proof.is_ok());
     }
 }

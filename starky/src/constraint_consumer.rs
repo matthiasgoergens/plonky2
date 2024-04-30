@@ -1,22 +1,29 @@
-use alloc::vec;
-use alloc::vec::Vec;
+//! Implementation of the constraint consumer.
+//!
+//! The [`ConstraintConsumer`], and its circuit counterpart, allow a
+//! prover to evaluate all polynomials of a [`Stark`][crate::stark::Stark].
+
+#[cfg(not(feature = "std"))]
+use alloc::{vec, vec::Vec};
 use core::marker::PhantomData;
 
 use plonky2::field::extension::Extendable;
 use plonky2::field::packed::PackedField;
+use plonky2::field::types::Field;
 use plonky2::hash::hash_types::RichField;
 use plonky2::iop::ext_target::ExtensionTarget;
 use plonky2::iop::target::Target;
 use plonky2::plonk::circuit_builder::CircuitBuilder;
 
+/// A [`ConstraintConsumer`] evaluates all constraint, permutation and cross-table
+/// lookup polynomials of a [`Stark`][crate::stark::Stark].
+#[derive(Debug)]
 pub struct ConstraintConsumer<P: PackedField> {
     /// Random values used to combine multiple constraints into one.
     alphas: Vec<P::Scalar>,
 
     /// Running sums of constraints that have been emitted so far, scaled by powers of alpha.
-    // TODO(JN): This is pub so it can be used in a test. Once we have an API for accessing this
-    // result, it should be made private.
-    pub constraint_accs: Vec<P>,
+    constraint_accs: Vec<P>,
 
     /// The evaluation of `X - g^(n-1)`.
     z_last: P,
@@ -28,9 +35,13 @@ pub struct ConstraintConsumer<P: PackedField> {
     /// The evaluation of the Lagrange basis polynomial which is nonzero at the point associated
     /// with the last trace row, and zero at other points in the subgroup.
     lagrange_basis_last: P,
+
+    ///  debug constraints
+    pub debug_api: bool,
 }
 
 impl<P: PackedField> ConstraintConsumer<P> {
+    /// Creates a new instance of [`ConstraintConsumer`].
     pub fn new(
         alphas: Vec<P::Scalar>,
         z_last: P,
@@ -43,20 +54,34 @@ impl<P: PackedField> ConstraintConsumer<P> {
             z_last,
             lagrange_basis_first,
             lagrange_basis_last,
+            debug_api: false,
         }
     }
 
+    /// Consumes this [`ConstraintConsumer`] and outputs its sum of accumulated
+    /// constraints scaled by powers of `alpha`.
     pub fn accumulators(self) -> Vec<P> {
         self.constraint_accs
     }
 
     /// Add one constraint valid on all rows except the last.
+    ///
+    /// Leaves degree unchanged.
+    #[track_caller]
     pub fn constraint_transition(&mut self, constraint: P) {
         self.constraint(constraint * self.z_last);
     }
 
     /// Add one constraint on all rows.
+    #[track_caller]
     pub fn constraint(&mut self, constraint: P) {
+        #[cfg(feature = "std")]
+        if self.debug_api && !constraint.is_zeros() {
+            log::error!(
+                "ConstraintConsumer - DEBUG trace (non-zero-constraint): {}",
+                std::panic::Location::caller()
+            );
+        }
         for (&alpha, acc) in self.alphas.iter().zip(&mut self.constraint_accs) {
             *acc *= alpha;
             *acc += constraint;
@@ -65,17 +90,43 @@ impl<P: PackedField> ConstraintConsumer<P> {
 
     /// Add one constraint, but first multiply it by a filter such that it will only apply to the
     /// first row of the trace.
+    ///
+    /// Increases degree by 1.
+    #[track_caller]
     pub fn constraint_first_row(&mut self, constraint: P) {
         self.constraint(constraint * self.lagrange_basis_first);
     }
 
     /// Add one constraint, but first multiply it by a filter such that it will only apply to the
     /// last row of the trace.
+    ///
+    /// Increases degree by 1.
+    #[track_caller]
     pub fn constraint_last_row(&mut self, constraint: P) {
         self.constraint(constraint * self.lagrange_basis_last);
     }
+
+    /// Creates a new instance of [`ConstraintConsumer`] for debugging purposes.
+    pub fn new_debug_api(is_first: bool, is_last: bool) -> Self {
+        let convert = |b: bool| P::from(P::Scalar::from_bool(b));
+        Self {
+            constraint_accs: vec![P::ZEROS],
+            alphas: vec![P::Scalar::ONE],
+            z_last: convert(!is_last),
+            lagrange_basis_first: convert(is_first),
+            lagrange_basis_last: convert(is_last),
+            debug_api: true,
+        }
+    }
+
+    /// Returns `true` if any constraint has failed.
+    pub fn debug_api_has_constraint_failed(&self) -> bool {
+        !self.constraint_accs.iter().all(|e| e.is_zeros())
+    }
 }
 
+/// Circuit version of [`ConstraintConsumer`].
+#[derive(Debug)]
 pub struct RecursiveConstraintConsumer<F: RichField + Extendable<D>, const D: usize> {
     /// A random value used to combine multiple constraints into one.
     alphas: Vec<Target>,
@@ -98,6 +149,7 @@ pub struct RecursiveConstraintConsumer<F: RichField + Extendable<D>, const D: us
 }
 
 impl<F: RichField + Extendable<D>, const D: usize> RecursiveConstraintConsumer<F, D> {
+    /// Creates a new instance of [`RecursiveConstraintConsumer`].
     pub fn new(
         zero: ExtensionTarget<D>,
         alphas: Vec<Target>,
@@ -115,6 +167,8 @@ impl<F: RichField + Extendable<D>, const D: usize> RecursiveConstraintConsumer<F
         }
     }
 
+    /// Consumes this [`RecursiveConstraintConsumer`] and outputs its sum of accumulated
+    /// `Target` constraints scaled by powers of `alpha`.
     pub fn accumulators(self) -> Vec<ExtensionTarget<D>> {
         self.constraint_accs
     }

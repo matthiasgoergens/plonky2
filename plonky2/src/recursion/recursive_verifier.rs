@@ -1,3 +1,6 @@
+#[cfg(not(feature = "std"))]
+use alloc::vec;
+
 use crate::field::extension::Extendable;
 use crate::hash::hash_types::{HashOutTarget, RichField};
 use crate::plonk::circuit_builder::CircuitBuilder;
@@ -66,6 +69,8 @@ impl<F: RichField + Extendable<D>, const D: usize> CircuitBuilder<F, D> {
         };
         let local_zs = &proof.openings.plonk_zs;
         let next_zs = &proof.openings.plonk_zs_next;
+        let local_lookup_zs = &proof.openings.lookup_zs;
+        let next_lookup_zs = &proof.openings.next_lookup_zs;
         let s_sigmas = &proof.openings.plonk_sigmas;
         let partial_products = &proof.openings.partial_products;
 
@@ -82,11 +87,14 @@ impl<F: RichField + Extendable<D>, const D: usize> CircuitBuilder<F, D> {
                 vars,
                 local_zs,
                 next_zs,
+                local_lookup_zs,
+                next_lookup_zs,
                 partial_products,
                 s_sigmas,
                 &challenges.plonk_betas,
                 &challenges.plonk_gammas,
                 &challenges.plonk_alphas,
+                &challenges.plonk_deltas,
             )
         );
 
@@ -144,12 +152,15 @@ impl<F: RichField + Extendable<D>, const D: usize> CircuitBuilder<F, D> {
         let cap_height = fri_params.config.cap_height;
 
         let salt = salt_size(common_data.fri_params.hiding);
-        let num_leaves_per_oracle = &[
+        let num_leaves_per_oracle = &mut vec![
             common_data.num_preprocessed_polys(),
             config.num_wires + salt,
-            common_data.num_zs_partial_products_polys() + salt,
-            common_data.num_quotient_polys() + salt,
+            common_data.num_zs_partial_products_polys() + common_data.num_all_lookup_polys() + salt,
         ];
+
+        if common_data.num_quotient_polys() > 0 {
+            num_leaves_per_oracle.push(common_data.num_quotient_polys() + salt);
+        }
 
         ProofTarget {
             wires_cap: self.add_virtual_cap(cap_height),
@@ -164,12 +175,20 @@ impl<F: RichField + Extendable<D>, const D: usize> CircuitBuilder<F, D> {
         let config = &common_data.config;
         let num_challenges = config.num_challenges;
         let total_partial_products = num_challenges * common_data.num_partial_products;
+        let has_lookup = common_data.num_lookup_polys != 0;
+        let num_lookups = if has_lookup {
+            common_data.num_all_lookup_polys()
+        } else {
+            0
+        };
         OpeningSetTarget {
             constants: self.add_virtual_extension_targets(common_data.num_constants),
             plonk_sigmas: self.add_virtual_extension_targets(config.num_routed_wires),
             wires: self.add_virtual_extension_targets(config.num_wires),
             plonk_zs: self.add_virtual_extension_targets(num_challenges),
             plonk_zs_next: self.add_virtual_extension_targets(num_challenges),
+            lookup_zs: self.add_virtual_extension_targets(num_lookups),
+            next_lookup_zs: self.add_virtual_extension_targets(num_lookups),
             partial_products: self.add_virtual_extension_targets(total_partial_products),
             quotient_polys: self.add_virtual_extension_targets(common_data.num_quotient_polys()),
         }
@@ -178,16 +197,24 @@ impl<F: RichField + Extendable<D>, const D: usize> CircuitBuilder<F, D> {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(not(feature = "std"))]
+    use alloc::{sync::Arc, vec};
+    #[cfg(feature = "std")]
+    use std::sync::Arc;
+
     use anyhow::Result;
+    use itertools::Itertools;
     use log::{info, Level};
 
     use super::*;
     use crate::fri::reduction_strategies::FriReductionStrategy;
     use crate::fri::FriConfig;
+    use crate::gadgets::lookup::{OTHER_TABLE, TIP5_TABLE};
+    use crate::gates::lookup_table::LookupTable;
     use crate::gates::noop::NoopGate;
     use crate::iop::witness::{PartialWitness, WitnessWrite};
     use crate::plonk::circuit_data::{CircuitConfig, VerifierOnlyCircuitData};
-    use crate::plonk::config::{GenericConfig, KeccakGoldilocksConfig, PoseidonGoldilocksConfig};
+    use crate::plonk::config::{KeccakGoldilocksConfig, PoseidonGoldilocksConfig};
     use crate::plonk::proof::{CompressedProofWithPublicInputs, ProofWithPublicInputs};
     use crate::plonk::prover::prove;
     use crate::util::timing::TimingTree;
@@ -200,10 +227,58 @@ mod tests {
         type F = <C as GenericConfig<D>>::F;
         let config = CircuitConfig::standard_recursion_zk_config();
 
-        let (proof, vd, cd) = dummy_proof::<F, C, D>(&config, 4_000)?;
-        let (proof, vd, cd) =
-            recursive_proof::<F, C, C, D>(proof, vd, cd, &config, None, true, true)?;
-        test_serialization(&proof, &vd, &cd)?;
+        let (proof, vd, common_data) = dummy_proof::<F, C, D>(&config, 4_000)?;
+        let (proof, vd, common_data) =
+            recursive_proof::<F, C, C, D>(proof, vd, common_data, &config, None, true, true)?;
+        test_serialization(&proof, &vd, &common_data)?;
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_recursive_verifier_one_lookup() -> Result<()> {
+        init_logger();
+        const D: usize = 2;
+        type C = PoseidonGoldilocksConfig;
+        type F = <C as GenericConfig<D>>::F;
+        let config = CircuitConfig::standard_recursion_zk_config();
+
+        let (proof, vd, common_data) = dummy_lookup_proof::<F, C, D>(&config, 10)?;
+        let (proof, vd, common_data) =
+            recursive_proof::<F, C, C, D>(proof, vd, common_data, &config, None, true, true)?;
+        test_serialization(&proof, &vd, &common_data)?;
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_recursive_verifier_two_luts() -> Result<()> {
+        init_logger();
+        const D: usize = 2;
+        type C = PoseidonGoldilocksConfig;
+        type F = <C as GenericConfig<D>>::F;
+        let config = CircuitConfig::standard_recursion_config();
+
+        let (proof, vd, common_data) = dummy_two_luts_proof::<F, C, D>(&config)?;
+        let (proof, vd, common_data) =
+            recursive_proof::<F, C, C, D>(proof, vd, common_data, &config, None, true, true)?;
+        test_serialization(&proof, &vd, &common_data)?;
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_recursive_verifier_too_many_rows() -> Result<()> {
+        init_logger();
+        const D: usize = 2;
+        type C = PoseidonGoldilocksConfig;
+        type F = <C as GenericConfig<D>>::F;
+        let config = CircuitConfig::standard_recursion_config();
+
+        let (proof, vd, common_data) = dummy_too_many_rows_proof::<F, C, D>(&config)?;
+        let (proof, vd, common_data) =
+            recursive_proof::<F, C, C, D>(proof, vd, common_data, &config, None, true, true)?;
+        test_serialization(&proof, &vd, &common_data)?;
 
         Ok(())
     }
@@ -218,20 +293,20 @@ mod tests {
         let config = CircuitConfig::standard_recursion_config();
 
         // Start with a degree 2^14 proof
-        let (proof, vd, cd) = dummy_proof::<F, C, D>(&config, 16_000)?;
-        assert_eq!(cd.degree_bits(), 14);
+        let (proof, vd, common_data) = dummy_proof::<F, C, D>(&config, 16_000)?;
+        assert_eq!(common_data.degree_bits(), 14);
 
         // Shrink it to 2^13.
-        let (proof, vd, cd) =
-            recursive_proof::<F, C, C, D>(proof, vd, cd, &config, Some(13), false, false)?;
-        assert_eq!(cd.degree_bits(), 13);
+        let (proof, vd, common_data) =
+            recursive_proof::<F, C, C, D>(proof, vd, common_data, &config, Some(13), false, false)?;
+        assert_eq!(common_data.degree_bits(), 13);
 
         // Shrink it to 2^12.
-        let (proof, vd, cd) =
-            recursive_proof::<F, C, C, D>(proof, vd, cd, &config, None, true, true)?;
-        assert_eq!(cd.degree_bits(), 12);
+        let (proof, vd, common_data) =
+            recursive_proof::<F, C, C, D>(proof, vd, common_data, &config, None, true, true)?;
+        assert_eq!(common_data.degree_bits(), 12);
 
-        test_serialization(&proof, &vd, &cd)?;
+        test_serialization(&proof, &vd, &common_data)?;
 
         Ok(())
     }
@@ -250,13 +325,20 @@ mod tests {
         let standard_config = CircuitConfig::standard_recursion_config();
 
         // An initial dummy proof.
-        let (proof, vd, cd) = dummy_proof::<F, C, D>(&standard_config, 4_000)?;
-        assert_eq!(cd.degree_bits(), 12);
+        let (proof, vd, common_data) = dummy_proof::<F, C, D>(&standard_config, 4_000)?;
+        assert_eq!(common_data.degree_bits(), 12);
 
         // A standard recursive proof.
-        let (proof, vd, cd) =
-            recursive_proof::<F, C, C, D>(proof, vd, cd, &standard_config, None, false, false)?;
-        assert_eq!(cd.degree_bits(), 12);
+        let (proof, vd, common_data) = recursive_proof::<F, C, C, D>(
+            proof,
+            vd,
+            common_data,
+            &standard_config,
+            None,
+            false,
+            false,
+        )?;
+        assert_eq!(common_data.degree_bits(), 12);
 
         // A high-rate recursive proof, designed to be verifiable with fewer routed wires.
         let high_rate_config = CircuitConfig {
@@ -268,9 +350,16 @@ mod tests {
             },
             ..standard_config
         };
-        let (proof, vd, cd) =
-            recursive_proof::<F, C, C, D>(proof, vd, cd, &high_rate_config, None, true, true)?;
-        assert_eq!(cd.degree_bits(), 12);
+        let (proof, vd, common_data) = recursive_proof::<F, C, C, D>(
+            proof,
+            vd,
+            common_data,
+            &high_rate_config,
+            None,
+            true,
+            true,
+        )?;
+        assert_eq!(common_data.degree_bits(), 12);
 
         // A final proof, optimized for size.
         let final_config = CircuitConfig {
@@ -284,11 +373,18 @@ mod tests {
             },
             ..high_rate_config
         };
-        let (proof, vd, cd) =
-            recursive_proof::<F, KC, C, D>(proof, vd, cd, &final_config, None, true, true)?;
-        assert_eq!(cd.degree_bits(), 12, "final proof too large");
+        let (proof, vd, common_data) = recursive_proof::<F, KC, C, D>(
+            proof,
+            vd,
+            common_data,
+            &final_config,
+            None,
+            true,
+            true,
+        )?;
+        assert_eq!(common_data.degree_bits(), 12, "final proof too large");
 
-        test_serialization(&proof, &vd, &cd)?;
+        test_serialization(&proof, &vd, &common_data)?;
 
         Ok(())
     }
@@ -302,15 +398,15 @@ mod tests {
         type F = <PC as GenericConfig<D>>::F;
 
         let config = CircuitConfig::standard_recursion_config();
-        let (proof, vd, cd) = dummy_proof::<F, PC, D>(&config, 4_000)?;
+        let (proof, vd, common_data) = dummy_proof::<F, PC, D>(&config, 4_000)?;
 
-        let (proof, vd, cd) =
-            recursive_proof::<F, PC, PC, D>(proof, vd, cd, &config, None, false, false)?;
-        test_serialization(&proof, &vd, &cd)?;
+        let (proof, vd, common_data) =
+            recursive_proof::<F, PC, PC, D>(proof, vd, common_data, &config, None, false, false)?;
+        test_serialization(&proof, &vd, &common_data)?;
 
-        let (proof, vd, cd) =
-            recursive_proof::<F, KC, PC, D>(proof, vd, cd, &config, None, false, false)?;
-        test_serialization(&proof, &vd, &cd)?;
+        let (proof, vd, common_data) =
+            recursive_proof::<F, KC, PC, D>(proof, vd, common_data, &config, None, false, false)?;
+        test_serialization(&proof, &vd, &common_data)?;
 
         Ok(())
     }
@@ -334,6 +430,197 @@ mod tests {
         let data = builder.build::<C>();
         let inputs = PartialWitness::new();
         let proof = data.prove(inputs)?;
+        data.verify(proof.clone())?;
+
+        Ok((proof, data.verifier_only, data.common))
+    }
+
+    /// Creates a dummy lookup proof which does one lookup to one LUT.
+    fn dummy_lookup_proof<
+        F: RichField + Extendable<D>,
+        C: GenericConfig<D, F = F>,
+        const D: usize,
+    >(
+        config: &CircuitConfig,
+        num_dummy_gates: u64,
+    ) -> Result<Proof<F, C, D>> {
+        let mut builder = CircuitBuilder::<F, D>::new(config.clone());
+        let initial_a = builder.add_virtual_target();
+        let initial_b = builder.add_virtual_target();
+
+        let look_val_a = 1;
+        let look_val_b = 2;
+
+        let tip5_table = TIP5_TABLE.to_vec();
+        let table: LookupTable = Arc::new((0..256).zip_eq(tip5_table).collect());
+
+        let out_a = table[look_val_a].1;
+        let out_b = table[look_val_b].1;
+
+        let tip5_index = builder.add_lookup_table_from_pairs(table);
+
+        let output_a = builder.add_lookup_from_index(initial_a, tip5_index);
+        let output_b = builder.add_lookup_from_index(initial_b, tip5_index);
+
+        for _ in 0..num_dummy_gates + 1 {
+            builder.add_gate(NoopGate, vec![]);
+        }
+
+        builder.register_public_input(initial_a);
+        builder.register_public_input(initial_b);
+        builder.register_public_input(output_a);
+        builder.register_public_input(output_b);
+
+        let data = builder.build::<C>();
+        let mut inputs = PartialWitness::new();
+        inputs.set_target(initial_a, F::from_canonical_usize(look_val_a));
+        inputs.set_target(initial_b, F::from_canonical_usize(look_val_b));
+
+        let proof = data.prove(inputs)?;
+        data.verify(proof.clone())?;
+
+        assert!(
+            proof.public_inputs[2] == F::from_canonical_u16(out_a),
+            "First lookup, at index {} in the Tip5 table gives an incorrect output.",
+            proof.public_inputs[0]
+        );
+        assert!(
+            proof.public_inputs[3] == F::from_canonical_u16(out_b),
+            "Second lookup, at index {} in the Tip5 table gives an incorrect output.",
+            proof.public_inputs[1]
+        );
+
+        Ok((proof, data.verifier_only, data.common))
+    }
+
+    /// Creates a dummy lookup proof which does one lookup to two different LUTs.
+    fn dummy_two_luts_proof<
+        F: RichField + Extendable<D>,
+        C: GenericConfig<D, F = F>,
+        const D: usize,
+    >(
+        config: &CircuitConfig,
+    ) -> Result<Proof<F, C, D>> {
+        let mut builder = CircuitBuilder::<F, D>::new(config.clone());
+        let initial_a = builder.add_virtual_target();
+        let initial_b = builder.add_virtual_target();
+
+        let look_val_a = 1;
+        let look_val_b = 2;
+
+        let tip5_table = TIP5_TABLE.to_vec();
+
+        let first_out = tip5_table[look_val_a];
+        let second_out = tip5_table[look_val_b];
+
+        let table: LookupTable = Arc::new((0..256).zip_eq(tip5_table).collect());
+
+        let other_table = OTHER_TABLE.to_vec();
+
+        let tip5_index = builder.add_lookup_table_from_pairs(table);
+        let output_a = builder.add_lookup_from_index(initial_a, tip5_index);
+
+        let output_b = builder.add_lookup_from_index(initial_b, tip5_index);
+        let sum = builder.add(output_a, output_b);
+
+        let s = first_out + second_out;
+        let final_out = other_table[s as usize];
+
+        let table2: LookupTable = Arc::new((0..256).zip_eq(other_table).collect());
+
+        let other_index = builder.add_lookup_table_from_pairs(table2);
+        let output_final = builder.add_lookup_from_index(sum, other_index);
+
+        builder.register_public_input(initial_a);
+        builder.register_public_input(initial_b);
+
+        builder.register_public_input(sum);
+        builder.register_public_input(output_a);
+        builder.register_public_input(output_b);
+        builder.register_public_input(output_final);
+
+        let mut pw = PartialWitness::new();
+        pw.set_target(initial_a, F::ONE);
+        pw.set_target(initial_b, F::TWO);
+
+        let data = builder.build::<C>();
+        let proof = data.prove(pw)?;
+        data.verify(proof.clone())?;
+
+        assert!(
+            proof.public_inputs[3] == F::from_canonical_u16(first_out),
+            "First lookup, at index {} in the Tip5 table gives an incorrect output.",
+            proof.public_inputs[0]
+        );
+        assert!(
+            proof.public_inputs[4] == F::from_canonical_u16(second_out),
+            "Second lookup, at index {} in the Tip5 table gives an incorrect output.",
+            proof.public_inputs[1]
+        );
+        assert!(
+            proof.public_inputs[2] == F::from_canonical_u16(s),
+            "Sum between the first two LUT outputs is incorrect."
+        );
+        assert!(
+            proof.public_inputs[5] == F::from_canonical_u16(final_out),
+            "Output of the second LUT at index {} is incorrect.",
+            s
+        );
+
+        Ok((proof, data.verifier_only, data.common))
+    }
+
+    /// Creates a dummy proof which has more than 256 lookups to one LUT.
+    fn dummy_too_many_rows_proof<
+        F: RichField + Extendable<D>,
+        C: GenericConfig<D, F = F>,
+        const D: usize,
+    >(
+        config: &CircuitConfig,
+    ) -> Result<Proof<F, C, D>> {
+        let mut builder = CircuitBuilder::<F, D>::new(config.clone());
+
+        let initial_a = builder.add_virtual_target();
+        let initial_b = builder.add_virtual_target();
+
+        let look_val_a = 1;
+        let look_val_b = 2;
+
+        let tip5_table = TIP5_TABLE.to_vec();
+        let table: LookupTable = Arc::new((0..256).zip_eq(tip5_table).collect());
+
+        let out_a = table[look_val_a].1;
+        let out_b = table[look_val_b].1;
+
+        let tip5_index = builder.add_lookup_table_from_pairs(table);
+        let output_b = builder.add_lookup_from_index(initial_b, tip5_index);
+        let mut output = builder.add_lookup_from_index(initial_a, tip5_index);
+        for _ in 0..514 {
+            output = builder.add_lookup_from_index(initial_a, tip5_index);
+        }
+
+        builder.register_public_input(initial_a);
+        builder.register_public_input(initial_b);
+        builder.register_public_input(output_b);
+        builder.register_public_input(output);
+
+        let mut pw = PartialWitness::new();
+
+        pw.set_target(initial_a, F::from_canonical_usize(look_val_a));
+        pw.set_target(initial_b, F::from_canonical_usize(look_val_b));
+
+        let data = builder.build::<C>();
+        let proof = data.prove(pw)?;
+        assert!(
+            proof.public_inputs[2] == F::from_canonical_u16(out_b),
+            "First lookup, at index {} in the Tip5 table gives an incorrect output.",
+            proof.public_inputs[1]
+        );
+        assert!(
+            proof.public_inputs[3] == F::from_canonical_u16(out_a),
+            "Lookups at index {} in the Tip5 table gives an incorrect output.",
+            proof.public_inputs[0]
+        );
         data.verify(proof.clone())?;
 
         Ok((proof, data.verifier_only, data.common))
@@ -405,19 +692,24 @@ mod tests {
     >(
         proof: &ProofWithPublicInputs<F, C, D>,
         vd: &VerifierOnlyCircuitData<C, D>,
-        cd: &CommonCircuitData<F, D>,
+        common_data: &CommonCircuitData<F, D>,
     ) -> Result<()> {
         let proof_bytes = proof.to_bytes();
         info!("Proof length: {} bytes", proof_bytes.len());
-        let proof_from_bytes = ProofWithPublicInputs::from_bytes(proof_bytes, cd)?;
+        let proof_from_bytes = ProofWithPublicInputs::from_bytes(proof_bytes, common_data)?;
         assert_eq!(proof, &proof_from_bytes);
 
+        #[cfg(feature = "std")]
         let now = std::time::Instant::now();
-        let compressed_proof = proof.clone().compress(&vd.circuit_digest, cd)?;
+
+        let compressed_proof = proof.clone().compress(&vd.circuit_digest, common_data)?;
         let decompressed_compressed_proof = compressed_proof
             .clone()
-            .decompress(&vd.circuit_digest, cd)?;
+            .decompress(&vd.circuit_digest, common_data)?;
+
+        #[cfg(feature = "std")]
         info!("{:.4}s to compress proof", now.elapsed().as_secs_f64());
+
         assert_eq!(proof, &decompressed_compressed_proof);
 
         let compressed_proof_bytes = compressed_proof.to_bytes();
@@ -426,7 +718,7 @@ mod tests {
             compressed_proof_bytes.len()
         );
         let compressed_proof_from_bytes =
-            CompressedProofWithPublicInputs::from_bytes(compressed_proof_bytes, cd)?;
+            CompressedProofWithPublicInputs::from_bytes(compressed_proof_bytes, common_data)?;
         assert_eq!(compressed_proof, compressed_proof_from_bytes);
 
         Ok(())

@@ -341,6 +341,12 @@ pub trait Field:
     /// Returns `n % Self::characteristic()`.
     fn from_noncanonical_u128(n: u128) -> Self;
 
+    /// Returns `x % Self::CHARACTERISTIC`.
+    fn from_noncanonical_u64(n: u64) -> Self;
+
+    /// Returns `n` as an element of this field.
+    fn from_noncanonical_i64(n: i64) -> Self;
+
     /// Returns `n % Self::characteristic()`. May be cheaper than from_noncanonical_u128 when we know
     /// that `n < 2 ** 96`.
     #[inline]
@@ -501,14 +507,6 @@ pub trait PrimeField: Field {
 pub trait Field64: Field {
     const ORDER: u64;
 
-    /// Returns `x % Self::CHARACTERISTIC`.
-    // TODO: Move to `Field`.
-    fn from_noncanonical_u64(n: u64) -> Self;
-
-    /// Returns `n` as an element of this field.
-    // TODO: Move to `Field`.
-    fn from_noncanonical_i64(n: i64) -> Self;
-
     /// Returns `n` as an element of this field. Assumes that `0 <= n < Self::ORDER`.
     // TODO: Move to `Field`.
     // TODO: Should probably be unsafe.
@@ -558,6 +556,14 @@ pub trait PrimeField64: PrimeField + Field64 {
 
     fn to_noncanonical_u64(&self) -> u64;
 
+    fn to_canonical_i64(&self) -> i64 {
+        i64::try_from(self.to_canonical_u64()).unwrap_or_else(|_| {
+            i64::try_from(self.neg().to_canonical_u64())
+                .expect("This conversion should never fail.")
+                .neg()
+        })
+    }
+
     #[inline(always)]
     fn to_canonical(&self) -> Self {
         Self::from_canonical_u64(self.to_canonical_u64())
@@ -565,7 +571,7 @@ pub trait PrimeField64: PrimeField + Field64 {
 }
 
 /// An iterator over the powers of a certain base element `b`: `b^0, b^1, b^2, ...`.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct Powers<F: Field> {
     base: F,
     current: F,

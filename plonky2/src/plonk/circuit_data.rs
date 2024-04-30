@@ -1,11 +1,27 @@
-use alloc::collections::BTreeMap;
-use alloc::vec;
-use alloc::vec::Vec;
+//! Circuit data specific to the prover and the verifier.
+//!
+//! This module also defines a [`CircuitConfig`] to be customized
+//! when building circuits for arbitrary statements.
+//!
+//! After building a circuit, one obtains an instance of [`CircuitData`].
+//! This contains both prover and verifier data, allowing to generate
+//! proofs for the given circuit and verify them.
+//!
+//! Most of the [`CircuitData`] is actually prover-specific, and can be
+//! extracted by calling [`CircuitData::prover_data`] method.
+//! The verifier data can similarly be extracted by calling [`CircuitData::verifier_data`].
+//! This is useful to allow even small devices to verify plonky2 proofs.
+
+#[cfg(not(feature = "std"))]
+use alloc::{collections::BTreeMap, vec, vec::Vec};
 use core::ops::{Range, RangeFrom};
+#[cfg(feature = "std")]
+use std::collections::BTreeMap;
 
 use anyhow::Result;
 use serde::Serialize;
 
+use super::circuit_builder::LookupWire;
 use crate::field::extension::Extendable;
 use crate::field::fft::FftRootTable;
 use crate::field::types::Field;
@@ -17,13 +33,15 @@ use crate::fri::structure::{
 };
 use crate::fri::{FriConfig, FriParams};
 use crate::gates::gate::GateRef;
+use crate::gates::lookup::Lookup;
+use crate::gates::lookup_table::LookupTable;
 use crate::gates::selectors::SelectorsInfo;
 use crate::hash::hash_types::{HashOutTarget, MerkleCapTarget, RichField};
 use crate::hash::merkle_tree::MerkleCap;
 use crate::iop::ext_target::ExtensionTarget;
-use crate::iop::generator::WitnessGeneratorRef;
+use crate::iop::generator::{generate_partial_witness, WitnessGeneratorRef};
 use crate::iop::target::Target;
-use crate::iop::witness::PartialWitness;
+use crate::iop::witness::{PartialWitness, PartitionWitness};
 use crate::plonk::circuit_builder::CircuitBuilder;
 use crate::plonk::config::{GenericConfig, Hasher};
 use crate::plonk::plonk_common::PlonkOracle;
@@ -35,10 +53,22 @@ use crate::util::serialization::{
 };
 use crate::util::timing::TimingTree;
 
+/// Configuration to be used when building a circuit. This defines the shape of the circuit
+/// as well as its targeted security level and sub-protocol (e.g. FRI) parameters.
+///
+/// It supports a [`Default`] implementation tailored for recursion with Poseidon hash (of width 12)
+/// as internal hash function and FRI rate of 1/8.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct CircuitConfig {
+    /// The number of wires available at each row. This corresponds to the "width" of the circuit,
+    /// and consists in the sum of routed wires and advice wires.
     pub num_wires: usize,
+    /// The number of routed wires, i.e. wires that will be involved in Plonk's permutation argument.
+    /// This allows copy constraints, i.e. enforcing that two distant values in a circuit are equal.
+    /// Non-routed wires are called advice wires.
     pub num_routed_wires: usize,
+    /// The number of constants that can be used per gate. If a gate requires more constants than the config
+    /// allows, the [`CircuitBuilder`] will complain when trying to add this gate to its set of gates.
     pub num_constants: usize,
     /// Whether to use a dedicated gate for base field arithmetic, rather than using a single gate
     /// for both base field and extension field arithmetic.
@@ -47,6 +77,8 @@ pub struct CircuitConfig {
     /// The number of challenge points to generate, for IOPs that have soundness errors of (roughly)
     /// `degree / |F|`.
     pub num_challenges: usize,
+    /// A boolean to activate the zero-knowledge property. When this is set to `false`, proofs *may*
+    /// leak additional information.
     pub zero_knowledge: bool,
     /// A cap on the quotient polynomial's degree factor. The actual degree factor is derived
     /// systematically, but will never exceed this value.
@@ -61,12 +93,12 @@ impl Default for CircuitConfig {
 }
 
 impl CircuitConfig {
-    pub fn num_advice_wires(&self) -> usize {
+    pub const fn num_advice_wires(&self) -> usize {
         self.num_wires - self.num_routed_wires
     }
 
     /// A typical recursion config, without zero-knowledge, targeting ~100 bit security.
-    pub fn standard_recursion_config() -> Self {
+    pub const fn standard_recursion_config() -> Self {
         Self {
             num_wires: 135,
             num_routed_wires: 80,
@@ -108,6 +140,22 @@ impl CircuitConfig {
     }
 }
 
+/// Mock circuit data to only do witness generation without generating a proof.
+#[derive(Eq, PartialEq, Debug)]
+pub struct MockCircuitData<F: RichField + Extendable<D>, C: GenericConfig<D, F = F>, const D: usize>
+{
+    pub prover_only: ProverOnlyCircuitData<F, C, D>,
+    pub common: CommonCircuitData<F, D>,
+}
+
+impl<F: RichField + Extendable<D>, C: GenericConfig<D, F = F>, const D: usize>
+    MockCircuitData<F, C, D>
+{
+    pub fn generate_witness(&self, inputs: PartialWitness<F>) -> PartitionWitness<F> {
+        generate_partial_witness::<F, C, D>(inputs, &self.prover_only, &self.common)
+    }
+}
+
 /// Circuit data required by the prover or the verifier.
 #[derive(Eq, PartialEq, Debug)]
 pub struct CircuitData<F: RichField + Extendable<D>, C: GenericConfig<D, F = F>, const D: usize> {
@@ -134,7 +182,7 @@ impl<F: RichField + Extendable<D>, C: GenericConfig<D, F = F>, const D: usize>
         gate_serializer: &dyn GateSerializer<F, D>,
         generator_serializer: &dyn WitnessGeneratorSerializer<F, D>,
     ) -> IoResult<Self> {
-        let mut buffer = Buffer::new(bytes.to_vec());
+        let mut buffer = Buffer::new(bytes);
         buffer.read_circuit_data(gate_serializer, generator_serializer)
     }
 
@@ -204,6 +252,7 @@ impl<F: RichField + Extendable<D>, C: GenericConfig<D, F = F>, const D: usize>
 /// structure as succinct as we can. Thus we include various precomputed data which isn't strictly
 /// required, like LDEs of preprocessed polynomials. If more succinctness was desired, we could
 /// construct a more minimal prover structure and convert back and forth.
+#[derive(Debug)]
 pub struct ProverCircuitData<
     F: RichField + Extendable<D>,
     C: GenericConfig<D, F = F>,
@@ -231,7 +280,7 @@ impl<F: RichField + Extendable<D>, C: GenericConfig<D, F = F>, const D: usize>
         gate_serializer: &dyn GateSerializer<F, D>,
         generator_serializer: &dyn WitnessGeneratorSerializer<F, D>,
     ) -> IoResult<Self> {
-        let mut buffer = Buffer::new(bytes.to_vec());
+        let mut buffer = Buffer::new(bytes);
         buffer.read_prover_circuit_data(gate_serializer, generator_serializer)
     }
 
@@ -246,7 +295,7 @@ impl<F: RichField + Extendable<D>, C: GenericConfig<D, F = F>, const D: usize>
 }
 
 /// Circuit data required by the prover.
-#[derive(Debug)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VerifierCircuitData<
     F: RichField + Extendable<D>,
     C: GenericConfig<D, F = F>,
@@ -269,7 +318,7 @@ impl<F: RichField + Extendable<D>, C: GenericConfig<D, F = F>, const D: usize>
         bytes: Vec<u8>,
         gate_serializer: &dyn GateSerializer<F, D>,
     ) -> IoResult<Self> {
-        let mut buffer = Buffer::new(bytes);
+        let mut buffer = Buffer::new(&bytes);
         buffer.read_verifier_circuit_data(gate_serializer)
     }
 
@@ -292,7 +341,7 @@ pub struct ProverOnlyCircuitData<
     C: GenericConfig<D, F = F>,
     const D: usize,
 > {
-    pub generators: Vec<WitnessGeneratorRef<F>>,
+    pub generators: Vec<WitnessGeneratorRef<F, D>>,
     /// Generator indices (within the `Vec` above), indexed by the representative of each target
     /// they watch.
     pub generator_indices_by_watches: BTreeMap<usize, Vec<usize>>,
@@ -312,6 +361,33 @@ pub struct ProverOnlyCircuitData<
     /// A digest of the "circuit" (i.e. the instance, minus public inputs), which can be used to
     /// seed Fiat-Shamir.
     pub circuit_digest: <<C as GenericConfig<D>>::Hasher as Hasher<F>>::Hash,
+    ///The concrete placement of the lookup gates for each lookup table index.
+    pub lookup_rows: Vec<LookupWire>,
+    /// A vector of (looking_in, looking_out) pairs for each lookup table index.
+    pub lut_to_lookups: Vec<Lookup>,
+}
+
+impl<F: RichField + Extendable<D>, C: GenericConfig<D, F = F>, const D: usize>
+    ProverOnlyCircuitData<F, C, D>
+{
+    pub fn to_bytes(
+        &self,
+        generator_serializer: &dyn WitnessGeneratorSerializer<F, D>,
+        common_data: &CommonCircuitData<F, D>,
+    ) -> IoResult<Vec<u8>> {
+        let mut buffer = Vec::new();
+        buffer.write_prover_only_circuit_data(self, generator_serializer, common_data)?;
+        Ok(buffer)
+    }
+
+    pub fn from_bytes(
+        bytes: &[u8],
+        generator_serializer: &dyn WitnessGeneratorSerializer<F, D>,
+        common_data: &CommonCircuitData<F, D>,
+    ) -> IoResult<Self> {
+        let mut buffer = Buffer::new(bytes);
+        buffer.read_prover_only_circuit_data(generator_serializer, common_data)
+    }
 }
 
 /// Circuit data required by the verifier, but not the prover.
@@ -332,7 +408,7 @@ impl<C: GenericConfig<D>, const D: usize> VerifierOnlyCircuitData<C, D> {
     }
 
     pub fn from_bytes(bytes: Vec<u8>) -> IoResult<Self> {
-        let mut buffer = Buffer::new(bytes);
+        let mut buffer = Buffer::new(&bytes);
         buffer.read_verifier_only_circuit_data()
     }
 }
@@ -366,6 +442,15 @@ pub struct CommonCircuitData<F: RichField + Extendable<D>, const D: usize> {
 
     /// The number of partial products needed to compute the `Z` polynomials.
     pub num_partial_products: usize,
+
+    /// The number of lookup polynomials.
+    pub num_lookup_polys: usize,
+
+    /// The number of lookup selectors.
+    pub num_lookup_selectors: usize,
+
+    /// The stored lookup tables.
+    pub luts: Vec<LookupTable>,
 }
 
 impl<F: RichField + Extendable<D>, const D: usize> CommonCircuitData<F, D> {
@@ -379,7 +464,7 @@ impl<F: RichField + Extendable<D>, const D: usize> CommonCircuitData<F, D> {
         bytes: Vec<u8>,
         gate_serializer: &dyn GateSerializer<F, D>,
     ) -> IoResult<Self> {
-        let mut buffer = Buffer::new(bytes);
+        let mut buffer = Buffer::new(&bytes);
         buffer.read_common_circuit_data(gate_serializer)
     }
 
@@ -387,11 +472,11 @@ impl<F: RichField + Extendable<D>, const D: usize> CommonCircuitData<F, D> {
         self.fri_params.degree_bits
     }
 
-    pub fn degree(&self) -> usize {
+    pub const fn degree(&self) -> usize {
         1 << self.degree_bits()
     }
 
-    pub fn lde_size(&self) -> usize {
+    pub const fn lde_size(&self) -> usize {
         self.fri_params.lde_size()
     }
 
@@ -407,28 +492,39 @@ impl<F: RichField + Extendable<D>, const D: usize> CommonCircuitData<F, D> {
             .expect("No gates?")
     }
 
-    pub fn quotient_degree(&self) -> usize {
+    pub const fn quotient_degree(&self) -> usize {
         self.quotient_degree_factor * self.degree()
     }
 
     /// Range of the constants polynomials in the `constants_sigmas_commitment`.
-    pub fn constants_range(&self) -> Range<usize> {
+    pub const fn constants_range(&self) -> Range<usize> {
         0..self.num_constants
     }
 
     /// Range of the sigma polynomials in the `constants_sigmas_commitment`.
-    pub fn sigmas_range(&self) -> Range<usize> {
+    pub const fn sigmas_range(&self) -> Range<usize> {
         self.num_constants..self.num_constants + self.config.num_routed_wires
     }
 
     /// Range of the `z`s polynomials in the `zs_partial_products_commitment`.
-    pub fn zs_range(&self) -> Range<usize> {
+    pub const fn zs_range(&self) -> Range<usize> {
         0..self.config.num_challenges
     }
 
-    /// Range of the partial products polynomials in the `zs_partial_products_commitment`.
-    pub fn partial_products_range(&self) -> RangeFrom<usize> {
-        self.config.num_challenges..
+    /// Range of the partial products polynomials in the `zs_partial_products_lookup_commitment`.
+    pub const fn partial_products_range(&self) -> Range<usize> {
+        self.config.num_challenges..(self.num_partial_products + 1) * self.config.num_challenges
+    }
+
+    /// Range of lookup polynomials in the `zs_partial_products_lookup_commitment`.
+    pub const fn lookup_range(&self) -> RangeFrom<usize> {
+        self.num_zs_partial_products_polys()..
+    }
+
+    /// Range of lookup polynomials needed for evaluation at `g * zeta`.
+    pub const fn next_lookup_range(&self, i: usize) -> Range<usize> {
+        self.num_zs_partial_products_polys() + i * self.num_lookup_polys
+            ..self.num_zs_partial_products_polys() + i * self.num_lookup_polys + 2
     }
 
     pub(crate) fn get_fri_instance(&self, zeta: F::Extension) -> FriInstanceInfo<F, D> {
@@ -443,7 +539,7 @@ impl<F: RichField + Extendable<D>, const D: usize> CommonCircuitData<F, D> {
         let zeta_next = g * zeta;
         let zeta_next_batch = FriBatchInfo {
             point: zeta_next,
-            polynomials: self.fri_zs_polys(),
+            polynomials: self.fri_next_batch_polys(),
         };
 
         let openings = vec![zeta_batch, zeta_next_batch];
@@ -469,7 +565,7 @@ impl<F: RichField + Extendable<D>, const D: usize> CommonCircuitData<F, D> {
         let zeta_next = builder.mul_const_extension(g, zeta);
         let zeta_next_batch = FriBatchInfoTarget {
             point: zeta_next,
-            polynomials: self.fri_zs_polys(),
+            polynomials: self.fri_next_batch_polys(),
         };
 
         let openings = vec![zeta_batch, zeta_next_batch];
@@ -490,7 +586,7 @@ impl<F: RichField + Extendable<D>, const D: usize> CommonCircuitData<F, D> {
                 blinding: PlonkOracle::WIRES.blinding,
             },
             FriOracleInfo {
-                num_polys: self.num_zs_partial_products_polys(),
+                num_polys: self.num_zs_partial_products_polys() + self.num_all_lookup_polys(),
                 blinding: PlonkOracle::ZS_PARTIAL_PRODUCTS.blinding,
             },
             FriOracleInfo {
@@ -507,7 +603,7 @@ impl<F: RichField + Extendable<D>, const D: usize> CommonCircuitData<F, D> {
         )
     }
 
-    pub(crate) fn num_preprocessed_polys(&self) -> usize {
+    pub(crate) const fn num_preprocessed_polys(&self) -> usize {
         self.sigmas_range().end
     }
 
@@ -523,19 +619,36 @@ impl<F: RichField + Extendable<D>, const D: usize> CommonCircuitData<F, D> {
         )
     }
 
-    pub(crate) fn num_zs_partial_products_polys(&self) -> usize {
+    pub(crate) const fn num_zs_partial_products_polys(&self) -> usize {
         self.config.num_challenges * (1 + self.num_partial_products)
     }
 
+    /// Returns the total number of lookup polynomials.
+    pub(crate) const fn num_all_lookup_polys(&self) -> usize {
+        self.config.num_challenges * self.num_lookup_polys
+    }
     fn fri_zs_polys(&self) -> Vec<FriPolynomialInfo> {
         FriPolynomialInfo::from_range(PlonkOracle::ZS_PARTIAL_PRODUCTS.index, self.zs_range())
+    }
+
+    /// Returns polynomials that require evaluation at `zeta` and `g * zeta`.
+    fn fri_next_batch_polys(&self) -> Vec<FriPolynomialInfo> {
+        [self.fri_zs_polys(), self.fri_lookup_polys()].concat()
     }
 
     fn fri_quotient_polys(&self) -> Vec<FriPolynomialInfo> {
         FriPolynomialInfo::from_range(PlonkOracle::QUOTIENT.index, 0..self.num_quotient_polys())
     }
 
-    pub(crate) fn num_quotient_polys(&self) -> usize {
+    /// Returns the information for lookup polynomials, i.e. the index within the oracle and the indices of the polynomials within the commitment.
+    fn fri_lookup_polys(&self) -> Vec<FriPolynomialInfo> {
+        FriPolynomialInfo::from_range(
+            PlonkOracle::ZS_PARTIAL_PRODUCTS.index,
+            self.num_zs_partial_products_polys()
+                ..self.num_zs_partial_products_polys() + self.num_all_lookup_polys(),
+        )
+    }
+    pub(crate) const fn num_quotient_polys(&self) -> usize {
         self.config.num_challenges * self.quotient_degree_factor
     }
 
@@ -545,6 +658,7 @@ impl<F: RichField + Extendable<D>, const D: usize> CommonCircuitData<F, D> {
             self.fri_wire_polys(),
             self.fri_zs_partial_products_polys(),
             self.fri_quotient_polys(),
+            self.fri_lookup_polys(),
         ]
         .concat()
     }
